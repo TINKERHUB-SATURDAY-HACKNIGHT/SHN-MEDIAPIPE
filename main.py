@@ -1,15 +1,22 @@
 import os
 import sys
-import threading
 import cv2
 
-# Ensure local sibling modules resolve regardless of working directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from audio_engine import AudioEngine
+from config import (
+    CAMERA_INDEX,
+    FLIP_CAMERA,
+    FRAME_HEIGHT,
+    FRAME_WIDTH,
+    FULLSCREEN_BY_DEFAULT,
+    WINDOW_NAME,
+)
 from gesture_controller import GestureController
 from hud import HUD
 from pantry_memory import PantryMemory
+from state_machine import InspectionStateMachine
 from vision_analyzer import VisionAnalyzer
 
 
@@ -19,45 +26,34 @@ def main():
     vision = VisionAnalyzer()
     pantry = PantryMemory()
     hud = HUD()
+    fsm = InspectionStateMachine(audio=audio, vision=vision, pantry=pantry)
 
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+    # Use DirectShow on Windows for faster high-res camera initialization
+    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(CAMERA_INDEX)
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
     if not cap.isOpened():
-        print("Error: Could not access webcam.")
-        audio.speak("Camera could not be opened. Please check your webcam connection.")
+        print("Error: Could not open webcam.")
+        audio.speak("Camera could not be opened.")
         return
 
-    state = {
-        "caption": "Hold a fruit in front of the camera and pinch thumb + index finger to scan.",
-        "busy": False,
-    }
+    # Configure Full-Screen OpenCV Window
+    is_fullscreen = FULLSCREEN_BY_DEFAULT
+    is_flipped = FLIP_CAMERA
+
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    if is_fullscreen:
+        cv2.setWindowProperty(
+            WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
+        )
 
     audio.speak(
-        "FreshPick ready. Hold a fruit near the center and pinch to hear its visual description and freshness priority."
+        "FreshPick full screen ready. Hold a fruit inside the center box for a 10 second 360 freshness scan."
     )
-
-    def run_single_scan(crop_img):
-        state["busy"] = True
-        state["caption"] = "Scanning fruit surface and translating image to speech..."
-        try:
-            result = vision.analyze_single_fruit(crop_img)
-            pantry.add_item(result)
-            state["caption"] = result["spoken_text"]
-            audio.speak(result["spoken_text"], interrupt=True)
-        finally:
-            state["busy"] = False
-
-    def run_dual_comparison(left_crop, right_crop):
-        state["busy"] = True
-        state["caption"] = "Comparing fruits in your left and right hands..."
-        try:
-            comparison_speech = vision.compare_two_fruits(left_crop, right_crop)
-            state["caption"] = comparison_speech
-            audio.speak(comparison_speech, interrupt=True)
-        finally:
-            state["busy"] = False
 
     try:
         while True:
@@ -65,78 +61,48 @@ def main():
             if not ret:
                 break
 
-            # Mirror view for intuitive hand interaction
-            frame = cv2.flip(frame, 1)
+            # Normal camera by default; press 'F' to toggle mirror if needed
+            if is_flipped:
+                frame = cv2.flip(frame, 1)
 
-            (
-                annotated_frame,
-                gesture_event,
-                gesture_progress,
-                hand_data,
-                centering_hint,
-            ) = gesture_ctrl.process_frame(frame)
+            detection = gesture_ctrl.process_frame(frame)
+            fsm.update(detection)
 
-            # Give gentle audio centering hints if hand is near edge of camera
-            if centering_hint and not state["busy"]:
-                audio.speak_centering_hint(centering_hint)
-
-            # Handle Gesture Events
-            if gesture_event and not state["busy"]:
-                audio.play_scan_trigger_tone()
-
-                if gesture_event == "PINCH_SCAN" and hand_data:
-                    # If 2 hands are visible (1 holding fruit, 1 pinching), scan the non-pinching hand crop or largest crop
-                    target_crop = max(
-                        hand_data,
-                        key=lambda h: (h["bbox"][2] - h["bbox"][0]) * (h["bbox"][3] - h["bbox"][1]),
-                    )["crop"]
-                    threading.Thread(
-                        target=run_single_scan, args=(target_crop,), daemon=True
-                    ).start()
-
-                elif gesture_event == "DUAL_COMPARE" and len(hand_data) >= 2:
-                    # Sort hands left-to-right on screen
-                    sorted_hands = sorted(hand_data, key=lambda h: h["center"][0])
-                    left_crop = sorted_hands[0]["crop"]
-                    right_crop = sorted_hands[1]["crop"]
-                    threading.Thread(
-                        target=run_dual_comparison,
-                        args=(left_crop, right_crop),
-                        daemon=True,
-                    ).start()
-
-                elif gesture_event == "PALM_RECAP":
-                    recap_text = pantry.get_spoken_recap()
-                    state["caption"] = recap_text
-                    audio.speak(recap_text, interrupt=True)
-
-                elif gesture_event == "THUMB_SAFETY":
-                    safety_note = (
-                        "Safety reminder: Cameras only see outer peel color and spots. "
-                        "Always press gently for soft spots and smell near the stem to check for internal spoilage."
-                    )
-                    state["caption"] = safety_note
-                    audio.speak(safety_note, interrupt=True)
-
-            # Render accessibility HUD
             display_frame = hud.render(
-                frame=annotated_frame,
-                hand_data=hand_data,
-                gesture_progress=gesture_progress,
-                last_caption=state["caption"],
+                frame=detection["annotated_frame"],
+                detection=detection,
+                state_name=fsm.state,
+                elapsed_10s=fsm.get_10s_elapsed(),
+                rotation_deg=fsm.rotation_deg,
+                caption=fsm.caption,
                 pantry_items=pantry.get_sorted_items(),
+                is_flipped=is_flipped,
             )
 
-            cv2.imshow("FreshPick - Beyond Gesture (SHN #01)", display_frame)
+            cv2.imshow(WINDOW_NAME, display_frame)
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord("q") or key == 27:
+            if key == ord("q") or key == 27:  # Q or ESC to quit
                 break
-            elif key == ord("r"):
-                # Keyboard shortcut backup for demoing Pantry Recap
-                recap_text = pantry.get_spoken_recap()
-                state["caption"] = recap_text
-                audio.speak(recap_text, interrupt=True)
+            elif key == ord("f"):  # Toggle Normal vs Mirror camera live
+                is_flipped = not is_flipped
+            elif key == ord(" "):  # SPACEBAR: Instant scan of center zone
+                h, w, _ = frame.shape
+                center_crop = frame[int(h * 0.2):int(h * 0.8), int(w * 0.28):int(w * 0.72)].copy()
+                target_crop = detection["primary_crop"] if detection["primary_crop"] is not None else center_crop
+                audio.play_lock_chime()
+                fsm.trigger_instant_scan(target_crop)
+            elif key == ord("r"):  # R: Read out Use-First to Use-Last list
+                recap = pantry.get_spoken_recap()
+                fsm.caption = recap
+                audio.speak(recap, interrupt=True)
+            elif key == ord("w"):  # W: Toggle Fullscreen / Windowed
+                is_fullscreen = not is_fullscreen
+                cv2.setWindowProperty(
+                    WINDOW_NAME,
+                    cv2.WND_PROP_FULLSCREEN,
+                    cv2.WINDOW_FULLSCREEN if is_fullscreen else cv2.WINDOW_NORMAL,
+                )
 
     finally:
         cap.release()

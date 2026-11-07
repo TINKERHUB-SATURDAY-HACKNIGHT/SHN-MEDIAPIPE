@@ -1,6 +1,12 @@
-opencv-python>=4.8.0
-mediapipe>=0.10.9
+opencv-python>=4.9
+mediapipe>=0.10.14
+numpy>=1.24
 pyttsx3>=2.90
-numpy>=1.24.0
-Pillow>=10.0.0
-google-genai>=0.3.0
+sounddevice>=0.4.6
+pillow>=10.0
+python-dotenv>=1.0
+ 
+# Gemini API (vision_analyzer.py's primary path -- falls back to the
+# OpenCV HSV heuristic automatically if this import fails or no key is set)
+google-genai>=1.0
+ 

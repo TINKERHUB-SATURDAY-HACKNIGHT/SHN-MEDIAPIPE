@@ -4,116 +4,143 @@ import numpy as np
 
 class HUD:
     URGENCY_COLORS = {
-        "EAT_TODAY": (0, 80, 255),      # Red-Orange (BGR)
-        "USE_SOON": (0, 215, 255),      # Gold-Yellow (BGR)
-        "STORE_LONGER": (80, 220, 80),  # Green (BGR)
+        "EAT_TODAY": (40, 60, 255),     # Bright Red-Orange (Use First)
+        "USE_SOON": (0, 215, 255),      # Gold-Yellow (Use Second)
+        "STORE_LONGER": (80, 235, 100), # Bright Green (Use Last)
+    }
+
+    URGENCY_TAGS = {
+        "EAT_TODAY": "USE FIRST (Today)",
+        "USE_SOON": "USE SOON (2-3d)",
+        "STORE_LONGER": "USE LAST (Keep)",
     }
 
     def render(
         self,
         frame: np.ndarray,
-        hand_data: list,
-        gesture_progress: float,
-        last_caption: str,
+        detection: dict,
+        state_name: str,
+        elapsed_10s: float,
+        rotation_deg: float,
+        caption: str,
         pantry_items: list,
-        status_text: str = "Pinch: Scan | 2 Hands: Compare | Open Palm: Pantry List",
+        is_flipped: bool,
     ) -> np.ndarray:
         h, w, _ = frame.shape
         canvas = frame.copy()
 
-        # 1. Center Sweet-Spot Guide Box
-        cx1, cy1 = int(w * 0.25), int(h * 0.20)
-        cx2, cy2 = int(w * 0.75), int(h * 0.80)
-        cv2.rectangle(canvas, (cx1, cy1), (cx2, cy2), (180, 180, 180), 1)
+        # 1. Center Scan Zone Box
+        zx1, zy1 = int(w * 0.28), int(h * 0.20)
+        zx2, zy2 = int(w * 0.72), int(h * 0.80)
+        zone_color = (0, 255, 140) if detection["centered"] else (180, 180, 180)
+        cv2.rectangle(canvas, (zx1, zy1), (zx2, zy2), zone_color, 2)
         cv2.putText(
             canvas,
-            "SCAN ZONE",
-            (cx1 + 8, cy1 + 20),
+            "360 FRUIT SCAN ZONE (Hold Fruit Here)",
+            (zx1 + 12, zy1 + 28),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (200, 200, 200),
-            1,
+            0.65,
+            zone_color,
+            2,
         )
 
-        # 2. Hand / Fruit ROI Bounding Boxes
-        for hand in hand_data:
-            x1, y1, x2, y2 = hand["bbox"]
-            label = hand["label"]
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 180), 2)
+        # 2. Draw Hand / Fruit Bounding Boxes
+        for x1, y1, x2, y2, label in detection["hand_boxes"]:
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 255, 200), 2)
             cv2.putText(
                 canvas,
-                f"{label} Fruit ROI",
-                (x1, max(24, y1 - 8)),
+                label,
+                (x1, max(85, y1 - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
-                (0, 255, 180),
+                (0, 255, 200),
                 2,
             )
 
-        # 3. Top Header Banner
-        cv2.rectangle(canvas, (0, 0), (w, 62), (20, 20, 20), -1)
+        # 3. Top Header Bar
+        cv2.rectangle(canvas, (0, 0), (w, 72), (18, 18, 18), -1)
         cv2.putText(
             canvas,
-            "FreshPick | Assistive Gesture Freshness & Image-to-Text",
-            (14, 26),
+            f"FreshPick 360 | State: {state_name}",
+            (20, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.68,
+            0.78,
             (0, 255, 180),
             2,
         )
+        cam_mode = "Mirror" if is_flipped else "Normal Selfie"
+        controls = f"SPACE/Pinch: Instant Scan | R/Open Palm: Priority Recap | F: Camera ({cam_mode}) | F11: Fullscreen | Q: Quit"
         cv2.putText(
             canvas,
-            status_text,
-            (14, 50),
+            controls,
+            (20, 58),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
-            (230, 230, 230),
+            0.50,
+            (220, 220, 220),
             1,
         )
 
-        # 4. Gesture Hold Progress Bar
-        if gesture_progress > 0.05:
-            bar_w = int((w - 28) * min(1.0, gesture_progress))
-            cv2.rectangle(canvas, (14, 68), (w - 14, 82), (50, 50, 50), -1)
-            cv2.rectangle(canvas, (14, 68), (14 + bar_w, 82), (0, 255, 120), -1)
-
-        # 5. Pantry Priority Mini-Panel (Top Right)
-        if pantry_items:
-            panel_x = max(10, w - 270)
-            panel_h = 34 + min(4, len(pantry_items)) * 24
-            cv2.rectangle(canvas, (panel_x, 90), (w - 10, 90 + panel_h), (25, 25, 25), -1)
+        # 4. 10-Second Guided Cycle Progress Bar
+        if elapsed_10s > 0.05:
+            bar_x1, bar_y1, bar_x2, bar_y2 = 20, 78, w - 20, 102
+            cv2.rectangle(canvas, (bar_x1, bar_y1), (bar_x2, bar_y2), (45, 45, 45), -1)
+            fill_w = int((bar_x2 - bar_x1) * min(1.0, elapsed_10s / 10.0))
+            cv2.rectangle(canvas, (bar_x1, bar_y1), (bar_x1 + fill_w, bar_y2), (0, 230, 120), -1)
+            timer_label = f"10s Guided Cycle: {elapsed_10s:.1f}s / 10.0s"
+            if rotation_deg > 1.0:
+                timer_label += f" | Wrist Rotation: {int(rotation_deg)} deg"
             cv2.putText(
                 canvas,
-                "USE FIRST QUEUE:",
-                (panel_x + 10, 112),
+                timer_label,
+                (bar_x1 + 12, bar_y2 - 6),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.55,
                 (255, 255, 255),
-                1,
+                2,
             )
-            for idx, item in enumerate(pantry_items[:4]):
-                color = self.URGENCY_COLORS.get(item["urgency"], (200, 200, 200))
-                text = f"{idx + 1}. {item['fruit_name']} [{item['urgency']}]"
+
+        # 5. Right Side Panel: USE FIRST -> USE LAST Queue
+        if pantry_items:
+            pw = 360
+            px1 = max(10, w - pw - 16)
+            py1 = 114
+            py2 = py1 + 42 + min(6, len(pantry_items)) * 30
+            cv2.rectangle(canvas, (px1, py1), (w - 16, py2), (22, 22, 22), -1)
+            cv2.rectangle(canvas, (px1, py1), (w - 16, py2), (100, 100, 100), 1)
+            cv2.putText(
+                canvas,
+                "PRIORITY ORDER (USE FIRST -> LAST):",
+                (px1 + 12, py1 + 26),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.54,
+                (255, 255, 255),
+                2,
+            )
+            for idx, item in enumerate(pantry_items[:6]):
+                urg = item["urgency"]
+                color = self.URGENCY_COLORS.get(urg, (200, 200, 200))
+                tag = self.URGENCY_TAGS.get(urg, urg)
+                line = f"{idx + 1}. {item['fruit_name']} -> {tag}"
                 cv2.putText(
                     canvas,
-                    text[:32],
-                    (panel_x + 10, 136 + idx * 22),
+                    line[:40],
+                    (px1 + 12, py1 + 54 + idx * 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.44,
+                    0.50,
                     color,
-                    1,
+                    2,
                 )
 
-        # 6. High-Contrast Bottom Caption Bar (Image-to-Text Output)
-        cv2.rectangle(canvas, (0, h - 78), (w, h), (15, 15, 15), -1)
-        wrapped_lines = self._wrap_text(last_caption, max_chars=78)
-        for i, line in enumerate(wrapped_lines[:2]):
+        # 6. Bottom High-Contrast Voice Caption Banner
+        cv2.rectangle(canvas, (0, h - 92), (w, h), (15, 15, 15), -1)
+        lines = self._wrap_text(caption, max_chars=95)
+        for i, line in enumerate(lines[:2]):
             cv2.putText(
                 canvas,
                 line,
-                (14, h - 46 + (i * 26)),
+                (20, h - 54 + i * 32),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.56,
+                0.65,
                 (0, 245, 255),
                 2,
             )
@@ -121,7 +148,7 @@ class HUD:
         return canvas
 
     @staticmethod
-    def _wrap_text(text: str, max_chars: int = 78) -> list:
+    def _wrap_text(text: str, max_chars: int = 95) -> list:
         words = str(text).split()
         lines, current = [], ""
         for word in words:
