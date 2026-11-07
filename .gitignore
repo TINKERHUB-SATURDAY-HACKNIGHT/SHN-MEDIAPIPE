@@ -1,0 +1,6 @@
+﻿.venv/
+.env
+__pycache__/
+*.task
+*.pyc
+pantry_session.json
